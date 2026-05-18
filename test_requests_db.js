@@ -1,20 +1,20 @@
 const fs = require('fs');
 const { createClient } = require('@supabase/supabase-js');
 
-async function testProfiles() {
+async function testRequests() {
   const envFile = fs.readFileSync('.env.local', 'utf8');
   const envUrl = envFile.split('\n').find(l => l.startsWith('NEXT_PUBLIC_SUPABASE_URL=')).split('=')[1].trim();
   const envKey = envFile.split('\n').find(l => l.startsWith('NEXT_PUBLIC_SUPABASE_ANON_KEY=')).split('=')[1].trim();
 
   const supabase = createClient(envUrl, envKey);
 
-  console.log("Consultando perfiles registrados en la base de datos...");
+  console.log("Consultando solicitudes directas en la base de datos...");
   const { data, error } = await supabase
-    .from('profiles')
-    .select('id, full_name, role, created_at');
+    .from('adoption_requests')
+    .select('*, pets(name), profiles(full_name)');
 
-  console.log("PERFILES:", data);
+  console.log("SOLICITUDES:", data);
   console.log("ERROR:", error);
 }
 
-testProfiles().catch(console.error);
+testRequests().catch(console.error);

@@ -104,12 +104,12 @@ CREATE TRIGGER on_auth_user_created
 -- ============================================================
 -- RLS (Row Level Security)
 -- ============================================================
-ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.pets ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.adoption_requests ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.operation_logs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.vector_logs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.chat_messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.profiles DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.pets DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.adoption_requests DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.operation_logs DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.vector_logs DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.chat_messages DISABLE ROW LEVEL SECURITY;
 
 -- Profiles: cada usuario ve su propio perfil; admin ve todos
 DROP POLICY IF EXISTS "profiles_select" ON public.profiles;
@@ -121,6 +121,10 @@ CREATE POLICY "profiles_select" ON public.profiles FOR SELECT
 DROP POLICY IF EXISTS "profiles_update" ON public.profiles;
 CREATE POLICY "profiles_update" ON public.profiles FOR UPDATE
   USING (auth.uid() = id);
+
+DROP POLICY IF EXISTS "profiles_insert" ON public.profiles;
+CREATE POLICY "profiles_insert" ON public.profiles FOR INSERT
+  WITH CHECK (auth.uid() = id);
 
 -- Pets: todos los autenticados pueden ver; cualquiera puede insertar
 DROP POLICY IF EXISTS "pets_select" ON public.pets;

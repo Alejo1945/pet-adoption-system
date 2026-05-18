@@ -31,8 +31,19 @@ export default async function DashboardLayout({
     role: roleFromJWT, // Rol del JWT — lo que el usuario eligió al registrarse
   }
 
-  // Sincronizar el perfil en DB si hay discrepancia de rol
-  if (profileFromDB && profileFromDB.role !== roleFromJWT) {
+  // Si el perfil no existe en base de datos, lo creamos automáticamente al instante
+  if (!profileFromDB) {
+    console.log("BASE DE DATOS SINC: Creando perfil del dashboard...")
+    const displayName = fullNameFromJWT || user.email?.split('@')[0] || 'Usuario'
+    await supabase
+      .from('profiles')
+      .insert({
+        id: user.id,
+        full_name: displayName,
+        role: roleFromJWT
+      })
+  } else if (profileFromDB.role !== roleFromJWT) {
+    // Sincronizar el perfil en DB si hay discrepancia de rol
     await supabase
       .from('profiles')
       .update({ role: roleFromJWT })

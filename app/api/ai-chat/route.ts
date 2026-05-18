@@ -32,13 +32,15 @@ async function getMyRequests(supabase: any, userId: string) {
 
 async function getAllPendingRequests(supabase: any) {
   const client = getAdminClient(supabase)
-  const { data } = await client.from('adoption_requests').select('status, created_at, profiles(full_name), pets(name)').in('status', ['pending', 'pendiente', 'Pendiente', 'PENDING']).order('created_at', { ascending: false })
+  const { data, error } = await client.from('adoption_requests').select('status, created_at, profiles(full_name), pets(name)').in('status', ['pending', 'pendiente', 'Pendiente', 'PENDING']).order('created_at', { ascending: false })
+  if (error) console.error("SUPABASE ERROR in getAllPendingRequests:", error)
   return data || []
 }
 
 async function getAllRequests(supabase: any) {
   const client = getAdminClient(supabase)
-  const { data } = await client.from('adoption_requests').select('status, created_at, profiles(full_name), pets(name)').order('created_at', { ascending: false }).limit(10)
+  const { data, error } = await client.from('adoption_requests').select('status, created_at, profiles(full_name), pets(name)').order('created_at', { ascending: false }).limit(10)
+  if (error) console.error("SUPABASE ERROR in getAllRequests:", error)
   return data || []
 }
 
@@ -79,8 +81,9 @@ async function getLastPet(supabase: any) {
 }
 
 async function getFavorites(supabase: any, userId: string) {
+  const client = getAdminClient(supabase)
   console.log("FAVORITES userId:", userId)
-  const { data, error } = await supabase
+  const { data, error } = await client
     .from('favorites')
     .select('pet_id, created_at, pets(id, name, species, breed, age, description, status)')
     .eq('user_id', userId)
@@ -229,7 +232,7 @@ async function classifyUserMessage(message: string, role: string, history: strin
   }
 
   if (lowercaseMsg.includes('solicitud') || lowercaseMsg.includes('solicitudes')) {
-    const isPending = lowercaseMsg.includes('pendiente') || lowercaseMsg.includes('espera') || lowercaseMsg.includes('proceso')
+    const isPending = lowercaseMsg.includes('pendiente') || lowercaseMsg.includes('espera') || lowercaseMsg.includes('proceso') || lowercaseMsg.includes('nueva') || lowercaseMsg.includes('nuevas')
     return {
       action: isPending ? 'consultar_mis_solicitudes_pendientes' : 'consultar_mis_solicitudes',
       needs_confirmation: false,
@@ -291,11 +294,21 @@ async function classifyUserMessage(message: string, role: string, history: strin
     }
   `
 
-  const res = await fetch(`https://api.groq.com/openai/v1/chat/completions`, {
+  let res = await fetch(`https://api.groq.com/openai/v1/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_API_KEY}` },
     body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [{ role: 'user', content: prompt }], temperature: 0.1, response_format: { type: "json_object" } })
   })
+  
+  if (!res.ok) {
+    console.warn(`Groq 70B failed with status ${res.status}. Falling back to 8B instant model...`)
+    res = await fetch(`https://api.groq.com/openai/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_API_KEY}` },
+      body: JSON.stringify({ model: "llama-3.1-8b-instant", messages: [{ role: 'user', content: prompt }], temperature: 0.1, response_format: { type: "json_object" } })
+    })
+  }
+
   if (!res.ok) return { action: 'respuesta_general', context: {}, parameters: {} }
   try {
     const data = await res.json()
@@ -307,11 +320,21 @@ async function classifyUserMessage(message: string, role: string, history: strin
 
 async function callGroqText(prompt: string) {
   if (!GROQ_API_KEY) return "⚠️ Groq API Key no configurada."
-  const res = await fetch(`https://api.groq.com/openai/v1/chat/completions`, {
+  let res = await fetch(`https://api.groq.com/openai/v1/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_API_KEY}` },
     body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [{ role: 'user', content: prompt }], temperature: 0.7 })
   })
+  
+  if (!res.ok) {
+    console.warn(`Groq 70B failed with status ${res.status}. Falling back to 8B instant model...`)
+    res = await fetch(`https://api.groq.com/openai/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_API_KEY}` },
+      body: JSON.stringify({ model: "llama-3.1-8b-instant", messages: [{ role: 'user', content: prompt }], temperature: 0.7 })
+    })
+  }
+
   if (!res.ok) return "Lo siento, tuve un problema conectándome a los servidores de IA."
   const data = await res.json()
   return data.choices?.[0]?.message?.content || ""
@@ -332,8 +355,31 @@ export async function POST(req: NextRequest) {
   
   if (!message || !conversation_id) return NextResponse.json({ error: 'Faltan parámetros' }, { status: 400 })
 
-  const { data: profile } = await supabase.from('profiles').select('role').eq('id', user_id).single()
-  const role = profile?.role || rawRole || 'cliente'
+  let { data: profile } = await supabase.from('profiles').select('role').eq('id', user_id).single()
+  const userMetadataRole = user.user_metadata?.role || user.user_metadata?.raw_user_meta_data?.role
+  const resolvedAdmin = profile?.role === 'admin' || rawRole === 'admin' || userMetadataRole === 'admin'
+  const role = resolvedAdmin ? 'admin' : 'cliente'
+
+  // Autorreparador de perfiles: Sincroniza / Crea el perfil físicamente en la BD si no existe o está desactualizado
+  try {
+    const adminClient = getAdminClient(supabase)
+    const displayName = name || user.user_metadata?.full_name || user.email?.split('@')[0] || 'Usuario'
+    if (!profile) {
+      console.log("BASE DE DATOS SINC: Creando perfil faltante en Supabase...")
+      await adminClient.from('profiles').insert({
+        id: user_id,
+        full_name: displayName,
+        role: role
+      })
+      console.log("BASE DE DATOS SINC: Perfil creado con éxito:", { id: user_id, role })
+    } else if (profile.role !== role) {
+      console.log("BASE DE DATOS SINC: Sincronizando rol desactualizado a:", role)
+      await adminClient.from('profiles').update({ role }).eq('id', user_id)
+      console.log("BASE DE DATOS SINC: Rol sincronizado con éxito.")
+    }
+  } catch (syncErr) {
+    console.error("Error en sincronización automática de perfiles:", syncErr)
+  }
 
   // Log: recepción de mensaje
   console.log("MENSAJE:", message)
@@ -606,22 +652,29 @@ export async function POST(req: NextRequest) {
       if (dbData !== null && !responseText) {
         const dataPrompt = `
           SYSTEM:
-          Eres PetBot. Usa únicamente el JSON real entregado por el backend. 
-          No inventes mascotas, favoritos, solicitudes, usuarios, estados ni cantidades. 
-          Si el JSON está vacío, responde que no hay registros para esa consulta. 
-          Si la pregunta es personal, usa solo datos filtrados por user_id.
+          Eres PetBot, un asistente de adopción de mascotas sumamente amigable, natural y conversacional. 
+          
+          REGLAS DE CONVERSACIÓN NATURAL (CRÍTICAS):
+          1. **Evita la repetición de saludos mecánicos:** NO comiences cada mensaje con "¡Hola de nuevo!" o "Me alegra que hayas vuelto a preguntar". Si en el historial ya hubo un saludo inicial, ve DIRECTAMENTE al grano y responde la última pregunta de forma natural y fluida.
+          2. **Sé dinámico y contextual:** NO uses siempre las mismas despedidas o firmas como "Espero que disfrutes viendo a tus amigos peludos favoritos". Adapta tus palabras al tema actual. Si el usuario te pregunta por gatos o aves generales en el sistema, no hables de "favoritos" ni asumas cosas personales.
+          3. **Presentación de datos:** 
+             - Si el "JSON DB" está vacío (ej: []), responde amigablemente de acuerdo al tema (ej: "No he encontrado ningún gatito por ahora", "No tienes favoritos guardados por ahora").
+             - Si contiene datos, muéstralos de forma bonita e invita a la acción de forma variada e inteligente (ej: "¿Te gustaría adoptar a alguno?", "¿Quieres más información sobre alguno de ellos?").
+          4. **Diferenciación de Roles (Admin vs Cliente - CRÍTICA):**
+             - El usuario actual tiene el rol: "${role}".
+             - Si el rol es "admin", compórtate estrictamente como un asistente de gestión administrativa: NO le sugieras al administrador "encontrar tus próximas mascotas favoritas" o "buscar mascotas para adoptar". En su lugar, infórmale de manera profesional sobre el estado de las solicitudes del sistema, mascotas registradas o confirma operaciones de registro.
+             - Si el rol es "cliente", compórtate como un asistente para adoptantes: guíalo a encontrar mascotas, ver sus favoritos y consultar el estado de sus adopciones.
+
+          INFORMACIÓN DE LA BASE DE DATOS (YA FILTRADA):
+          El "JSON DB" que se te entrega ya ha sido filtrado estrictamente por el backend. Es seguro y le pertenece al usuario. No requieres un campo 'user_id' en los objetos para procesarlo.
 
           --- Historial de conversación ---
           ${chatHistory}
           ---------------------------------
 
-          Si es una lista de razas o edades o nombres, formatea así:
-          "Las mascotas ${scope || 'consultadas'} son:"
+          Si vas a listar mascotas, formatea de manera limpia y conversacional así:
+          "Las mascotas encontradas son:" o "Tus mascotas favoritas son:" (según sea el caso)
           "- [Nombre]: [Especie], [Raza], [Estado]"
-          
-          REGLA ESTRICTA DE PRIVACIDAD (IMPORTANTE):
-          Si el usuario pregunta por 'mis favoritos', 'tengo favoritos', 'mis solicitudes', 'mis notificaciones' o cualquier dato personal, responde SOLO con los datos filtrados del usuario actual que vienen en el JSON DB. 
-          Si el JSON DB está vacío o nulo para consultas personales, responde ÚNICAMENTE indicando eso (ej: "No tienes mascotas guardadas en favoritos por ahora."). BAJO NINGÚN CONCEPTO agregues texto como "sin embargo tienes una mascota en la base de datos" ni menciones otros registros globales.
 
           USER:
           Última Pregunta: ${message}

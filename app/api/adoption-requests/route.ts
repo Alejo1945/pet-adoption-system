@@ -2,15 +2,28 @@ import { createClient } from '@/lib/supabase/server'
 import { NextRequest, NextResponse } from 'next/server'
 import { logOperation } from '@/lib/logger'
 
+function getAdminClient(normalClient: any) {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (supabaseKey) {
+    const { createClient: createSupabaseClient } = require('@supabase/supabase-js')
+    return createSupabaseClient(supabaseUrl, supabaseKey)
+  }
+  return normalClient
+}
+
 // GET /api/adoption-requests
 export async function GET() {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'No autorizado' }, { status: 401 })
 
-  const role = user.user_metadata?.role ?? 'cliente'
+  const { data: profile } = await supabase.from('profiles').select('role').eq('id', user.id).single()
+  const role = profile?.role || user.user_metadata?.role || 'cliente'
 
-  let query = supabase
+  const client = role === 'admin' ? getAdminClient(supabase) : supabase
+
+  let query = client
     .from('adoption_requests')
     .select('*, pets(name, species, breed, status), profiles(full_name)')
     .order('created_at', { ascending: false })
@@ -99,13 +112,16 @@ export async function PATCH(request: NextRequest) {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'No autorizado' }, { status: 401 })
 
-  const role = user.user_metadata?.role ?? 'cliente'
+  const { data: profile } = await supabase.from('profiles').select('role').eq('id', user.id).single()
+  const role = profile?.role || user.user_metadata?.role || 'cliente'
   if (role !== 'admin') return NextResponse.json({ error: 'Solo admin' }, { status: 403 })
+
+  const client = getAdminClient(supabase)
 
   const { request_id, status } = await request.json()
   if (!request_id || !status) return NextResponse.json({ error: 'request_id y status requeridos' }, { status: 400 })
 
-  const { data: updatedRequest, error } = await supabase
+  const { data: updatedRequest, error } = await client
     .from('adoption_requests')
     .update({ status, updated_at: new Date().toISOString() })
     .eq('id', request_id)
@@ -117,12 +133,12 @@ export async function PATCH(request: NextRequest) {
   // Si se aprueba, marcar mascota como adoptada
   if (status === 'aprobada' && updatedRequest?.pets) {
     const petId = (updatedRequest.pets as any).id
-    await supabase.from('pets').update({ status: 'adoptado' }).eq('id', petId)
+    await client.from('pets').update({ status: 'adoptado' }).eq('id', petId)
   }
   // Si se rechaza, devolver a disponible
   if (status === 'rechazada' && updatedRequest?.pets) {
     const petId = (updatedRequest.pets as any).id
-    await supabase.from('pets').update({ status: 'disponible' }).eq('id', petId)
+    await client.from('pets').update({ status: 'disponible' }).eq('id', petId)
   }
 
   // Notificar al cliente sobre el cambio de estado de su solicitud
@@ -133,7 +149,7 @@ export async function PATCH(request: NextRequest) {
       ? `¡Felicidades! Tu solicitud para adoptar a ${petName} ha sido aprobada. Nos pondremos en contacto contigo pronto.`
       : `Lamentamos informarte que tu solicitud para adoptar a ${petName} ha sido rechazada.`
 
-    await supabase.from('notifications').insert({
+    await client.from('notifications').insert({
       user_id: updatedRequest.user_id,
       title,
       message,

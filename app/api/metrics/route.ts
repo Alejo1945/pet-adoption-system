@@ -11,7 +11,8 @@ export async function GET() {
   const { data: profile } = await supabase
     .from('profiles').select('role').eq('id', user.id).single()
 
-  if (profile?.role !== 'admin') {
+  const role = profile?.role || user.user_metadata?.role || 'cliente'
+  if (role !== 'admin') {
     return NextResponse.json({ error: 'Solo admin puede ver métricas' }, { status: 403 })
   }
 

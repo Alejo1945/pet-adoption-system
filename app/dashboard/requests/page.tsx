@@ -34,9 +34,18 @@ export default function RequestsPage() {
   useEffect(() => { fetchRequests() }, [])
 
   async function fetchRequests() {
-    const res = await fetch('/api/adoption-requests')
-    const data = await res.json()
-    setRequests(data.requests ?? [])
+    try {
+      const res = await fetch('/api/adoption-requests')
+      const data = await res.json()
+      if (!res.ok) {
+        toast.error(data.error || 'Error al cargar las solicitudes')
+        setLoading(false)
+        return
+      }
+      setRequests(data.requests ?? [])
+    } catch (err: any) {
+      toast.error('Error de conexión al servidor')
+    }
     setLoading(false)
   }
 
