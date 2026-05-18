@@ -1,6 +1,7 @@
 import { createClient } from '@/lib/supabase/server'
 import { NextRequest, NextResponse } from 'next/server'
 import { generateEmbedding, vectorToString } from '@/lib/embeddings'
+import { getSystemMetrics } from '@/lib/metrics'
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY
 
@@ -396,6 +397,222 @@ export async function POST(req: NextRequest) {
     const chatHistory = await getConversationContext(supabase, conversation_id, user_id)
     const lastContext = lastMsg?.metadata?.context || {}
     
+    const msgLower = message.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim()
+
+    if (role === 'admin') {
+      const adminClient = getAdminClient(supabase)
+      
+      const isQuantHeIngresado = msgLower.match(/cuant[ao]s?\s+(?:registros?|mascotas?)?\s*(?:he\s+ingresado|ingrese|he\s+registrado|registre|he\s+subido|subi)/i) || 
+                                 (msgLower.match(/cuant[ao]s?\s+(?:registros?|mascotas?)\s+(?:tengo|he\s+hecho)/i));
+      
+      const isMyLastRecords = msgLower.match(/(?:cuales\s+son\s+)?mis\s+ultimos?\s+(?:registros?|mascotas?)/i) || 
+                              msgLower.match(/ultimos?\s+(?:registros?|mascotas?)\s+(?:que\s+)?(?:ingrese|he\s+ingresado|registre|he\s+registrado)/i);
+      
+      const isSimilarDescription = msgLower.match(/(?:que\s+)?(?:registros?|mascotas?)\s+(?:son\s+)?(?:similares?|parecidos?)\s+a/i) || 
+                                   msgLower.match(/(?:buscar|encuentra|ver)\s+(?:registros?|mascotas?)\s+(?:similares?|parecidos?)/i) ||
+                                   msgLower.match(/(?:similares?|parecidos?)\s+a\s+esta\s+descripcion/i);
+      
+      const isLastStoredRecord = msgLower.match(/ultimo\s+registro\s+(?:almacenado|guardado|ingresado|registrado|creado|existente|del\s+sistema)/i) || 
+                                 msgLower.match(/cual\s+(?:fue\s+)?el\s+ultimo\s+(?:registro|mascota)\s+(?:almacenado|guardado|ingresado|registrado|creado)/i) ||
+                                 (msgLower.match(/ultimo\s+(?:registro|mascota)/i) && !msgLower.includes('mis') && !msgLower.includes('mi'));
+      
+      const isSystemErrors = msgLower.match(/(?:que\s+)?errores?\s+(?:se\s+han\s+presentado|hay|existen|ocurrieron|ocurrido|registrados?|del\s+sistema)/i) || 
+                             msgLower.match(/fallos?\s+(?:del\s+sistema|presentados?)/i);
+      
+      const isAvgInsertionTime = msgLower.match(/tiempo\s+promedio\s+(?:de\s+)?(?:insercion|registro|ingreso|guardado)/i) || 
+                                 msgLower.match(/latencia\s+promedio\s+(?:de\s+)?(?:insercion|registro|ingreso|guardado)/i) ||
+                                 msgLower.match(/promedio\s+de\s+(?:tiempo|latencia)\s+(?:de\s+)?(?:insercion|registro|ingreso|guardado)/i);
+      
+      const isUserWithMostRecords = msgLower.match(/usuario\s+(?:que\s+)?(?:ha\s+ingresado|ingreso|tiene|ha\s+registrado|registro)\s+mas\s+(?:registros|mascotas)/i) || 
+                                    msgLower.match(/quien\s+(?:ha\s+ingresado|ingreso|tiene|ha\s+registrado|registro)\s+mas\s+(?:registros|mascotas)/i) ||
+                                    msgLower.match(/usuario\s+con\s+mas\s+(?:registros|mascotas)/i) ||
+                                    msgLower.match(/top\s+usuario\s+(?:con\s+)?(?:mas\s+)?(?:registros|mascotas)/i);
+      
+      const isWhatCanWeGetFromMetrics = msgLower.match(/(?:que\s+)?(?:podemos\s+sacar|se\s+puede\s+obtener|informacion\s+hay|obtener)\s+(?:de\s+)?(?:las\s+)?metricas/i) || 
+                                         msgLower.match(/cuales\s+son\s+las\s+metricas/i) || 
+                                         msgLower.match(/ver\s+metricas/i) ||
+                                         msgLower.match(/^metricas$/i);
+
+      let responseText = ''
+
+      if (isQuantHeIngresado) {
+        const { count, error } = await adminClient
+          .from('pets')
+          .select('*', { count: 'exact', head: true })
+          .eq('user_id', user_id)
+        
+        if (error) {
+          responseText = `❌ Error al consultar tus registros: ${error.message}`
+        } else {
+          responseText = `📊 Has ingresado un total de **${count ?? 0} registros** (mascotas) en el sistema.`
+        }
+      } 
+      else if (isMyLastRecords) {
+        const { data: pets, error } = await adminClient
+          .from('pets')
+          .select('name, species, breed, status, created_at')
+          .eq('user_id', user_id)
+          .order('created_at', { ascending: false })
+          .limit(5)
+        
+        if (error) {
+          responseText = `❌ Error al obtener tus últimos registros: ${error.message}`
+        } else if (!pets || pets.length === 0) {
+          responseText = `📭 No tienes ningún registro ingresado en el sistema todavía.`
+        } else {
+          const list = pets.map((p: any, i: number) => 
+            `${i + 1}. **${p.name}** (${p.species}${p.breed ? ` - ${p.breed}` : ''}) — *${p.status}* — ${new Date(p.created_at).toLocaleDateString('es-MX')}`
+          ).join('\n')
+          responseText = `🐾 **Tus últimos registros en el sistema son:**\n\n${list}`
+        }
+      } 
+      else if (isSimilarDescription) {
+        let queryText = message;
+        const simMatch = msgLower.match(/(?:similar(?:es)?\s+a\s+esta\s+descripcion|similar(?:es)?\s+a)\s*:?\s*(.*)/i);
+        if (simMatch && simMatch[1]?.trim()) {
+          queryText = message.substring(message.toLowerCase().indexOf(simMatch[1].trim()));
+        }
+        
+        try {
+          const embeddingVec = generateEmbedding(queryText)
+          const { data: results, error } = await adminClient.rpc('search_similar_pets', {
+            query_embedding: vectorToString(embeddingVec),
+            match_threshold: 0.1,
+            match_count: 5
+          })
+          
+          if (error) {
+            responseText = `❌ Error en búsqueda semántica: ${error.message}`
+          } else if (!results || results.length === 0) {
+            responseText = `🔍 No se encontraron registros similares a la descripción: "${queryText}".`
+          } else {
+            const list = results.map((r: any, i: number) => 
+              `${i + 1}. **${r.name}** (${r.species}${r.breed ? ` - ${r.breed}` : ''}) — Similitud: **${(r.similarity * 100).toFixed(0)}%**\n   _${r.description}_`
+            ).join('\n\n')
+            responseText = `🔍 **Registros similares encontrados para "${queryText}":**\n\n${list}`
+          }
+        } catch (embErr: any) {
+          responseText = `❌ Ocurrió un problema al procesar la búsqueda vectorial: ${embErr.message}`
+        }
+      } 
+      else if (isLastStoredRecord) {
+        const { data: pets, error } = await adminClient
+          .from('pets')
+          .select('name, species, breed, status, created_at, profiles(full_name)')
+          .order('created_at', { ascending: false })
+          .limit(1)
+        
+        if (error) {
+          responseText = `❌ Error al consultar el último registro: ${error.message}`
+        } else if (!pets || pets.length === 0) {
+          responseText = `📭 No hay ningún registro guardado en el sistema todavía.`
+        } else {
+          const p = pets[0]
+          const creator = (p.profiles as any)?.full_name || 'Desconocido'
+          responseText = `🐾 **El último registro almacenado en el sistema es:**\n\n- **Nombre:** ${p.name}\n- **Especie:** ${p.species}\n- **Raza:** ${p.breed || 'No especificada'}\n- **Estado:** *${p.status}*\n- **Ingresado por:** ${creator}\n- **Fecha:** ${new Date(p.created_at).toLocaleString('es-MX')}`
+        }
+      } 
+      else if (isSystemErrors) {
+        const { data: errors, error } = await adminClient
+          .from('operation_logs')
+          .select('operation_type, error_message, created_at')
+          .eq('success', false)
+          .order('created_at', { ascending: false })
+          .limit(5)
+        
+        if (error) {
+          responseText = `❌ Error al consultar los errores: ${error.message}`
+        } else if (!errors || errors.length === 0) {
+          responseText = `✅ **¡Excelente! No se han presentado errores en el sistema.**`
+        } else {
+          const list = errors.map((e: any, i: number) => 
+            `${i + 1}. **${e.operation_type}** — ${e.error_message || 'Error no especificado'} — *${new Date(e.created_at).toLocaleString('es-MX')}*`
+          ).join('\n')
+          responseText = `⚠️ **Últimos errores presentados en el sistema:**\n\n${list}`
+        }
+      } 
+      else if (isAvgInsertionTime) {
+        const { data: logs, error } = await adminClient
+          .from('operation_logs')
+          .select('latency_ms')
+          .eq('operation_type', 'insert_pet')
+          .eq('success', true)
+        
+        if (error) {
+          responseText = `❌ Error al calcular latencia: ${error.message}`
+        } else {
+          const validLogs = logs?.filter((l: any) => (l.latency_ms ?? 0) > 0) || []
+          const avg = validLogs.length 
+            ? validLogs.reduce((s: number, l: any) => s + (l.latency_ms ?? 0), 0) / validLogs.length 
+            : 0
+          responseText = `⚡ **El tiempo promedio de inserción en el sistema es:** ${avg.toFixed(2)} ms (basado en ${validLogs.length} operaciones exitosas).`
+        }
+      } 
+      else if (isUserWithMostRecords) {
+        const { data: pets, error } = await adminClient
+          .from('pets')
+          .select('user_id, profiles(full_name)')
+        
+        if (error) {
+          responseText = `❌ Error al obtener estadísticas de usuarios: ${error.message}`
+        } else if (!pets || pets.length === 0) {
+          responseText = `📭 No hay registros en el sistema.`
+        } else {
+          const counts: Record<string, { name: string; count: number }> = {}
+          for (const p of pets) {
+            const uid = p.user_id ?? 'unknown'
+            const name = (p.profiles as any)?.full_name || 'Usuario Desconocido'
+            counts[uid] = { name, count: (counts[uid]?.count ?? 0) + 1 }
+          }
+          const sorted = Object.values(counts).sort((a, b) => b.count - a.count)
+          const top = sorted[0]
+          
+          if (!top) {
+            responseText = `📭 No se pudo determinar el usuario con más registros.`
+          } else {
+            responseText = `🏆 El usuario que ha ingresado más registros en el sistema es **${top.name}** con **${top.count} mascotas**.`
+          }
+        }
+      }
+      else if (isWhatCanWeGetFromMetrics) {
+        try {
+          const metrics = await getSystemMetrics()
+          responseText = `📊 **Métricas del Sistema PetAdopt**\n\nAquí tienes la información clave extraída directamente de la base de datos:\n\n` +
+            `- 🐾 **Total de Mascotas:** **${metrics.totalRecords}**\n` +
+            `- 🟢 **Disponibles:** **${metrics.availablePets}** | 🔴 **Adoptadas:** **${metrics.adoptedPets}**\n` +
+            `- 👥 **Total de Usuarios:** **${metrics.totalUsers}**\n` +
+            `- ⚡ **Tiempo Promedio Inserción:** **${metrics.avgInsertLatency} ms**\n` +
+            `- ✅ **Tasa Éxito Inserción:** **${metrics.insertSuccessRate}%**\n` +
+            `- ⚠️ **Errores Registrados:** **${metrics.insertErrors}**\n` +
+            `- 💬 **Consultas de Chat:** **${metrics.totalChatQueries}**\n` +
+            `- 🔍 **Tiempo Búsqueda Semántica:** **${metrics.avgQueryLatency} ms**\n` +
+            `- 🔗 **Mascotas Vectorizadas:** **${metrics.vectorStorageInfo.count}** (Dim: ${metrics.vectorStorageInfo.dimensions})\n\n` +
+            `💡 *Estas métricas te permiten monitorear la salud técnica y operativa del sistema en tiempo real.*`
+        } catch (metErr: any) {
+          responseText = `❌ Error al obtener las métricas generales: ${metErr.message}`
+        }
+      }
+
+      if (responseText) {
+        await adminClient.from('operation_logs').insert({ 
+          user_id, 
+          operation_type: `consulta_admin_directa`, 
+          metadata: { query: message, matched: true, role } 
+        })
+        
+        await insertChatMessage(supabase, { 
+          userId: user_id, 
+          role: 'assistant', 
+          content: responseText, 
+          conversationId: conversation_id, 
+          sender: 'PetBot',
+          metadata: { context: { detected_action: 'consulta_admin_directa', topic: 'metrics' } }
+        })
+        
+        return NextResponse.json({ response: responseText })
+      }
+    }
+
     const classResult = await classifyUserMessage(message, role, chatHistory)
     let action = classResult.action
     let params = classResult.parameters || {}
@@ -526,7 +743,13 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ response: responseText })
       }
     } else if (action === 'respuesta_general' || action === 'recomendacion_general') {
-      responseText = await callGroqText(`Eres PetBot, asistente del sistema PetAdopt. Responde de forma natural a esta consulta general: "${message}"`)
+      responseText = await callGroqText(
+        `Eres PetBot, asistente de PetAdopt. Responde de forma directa, natural y conversacional a esta consulta: "${message}". 
+        NO saludes, no digas "hola" ni te presentes de nuevo a menos que el usuario esté saludando explícitamente en su mensaje.
+        
+        Historial reciente de chat para contexto:
+        ${chatHistory}`
+      )
     } else {
       
       const adminClient = getAdminClient(supabase)

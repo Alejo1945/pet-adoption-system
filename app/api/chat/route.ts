@@ -96,7 +96,7 @@ async function generateResponse(
     const counts: Record<string, { name: string; count: number }> = {}
     for (const p of pets ?? []) {
       const uid = p.user_id ?? 'unknown'
-      const name = (p.profiles as Record<string, string> | null)?.full_name ?? 'Desconocido'
+      const name = (p.profiles as any)?.full_name ?? 'Desconocido'
       counts[uid] = { name, count: (counts[uid]?.count ?? 0) + 1 }
     }
     const top = Object.values(counts).sort((a, b) => b.count - a.count)[0]
@@ -120,7 +120,7 @@ async function generateResponse(
     const { data: reqs } = await query
     if (!reqs?.length) return '📭 No hay solicitudes de adopción registradas.'
     const list = reqs.map((r, i) => {
-      const petName = (r.pets as Record<string, string> | null)?.name ?? 'desconocida'
+      const petName = (r.pets as any)?.name ?? 'desconocida'
       return `${i + 1}. ${petName} — **${r.status}**`
     }).join('\n')
     return `📋 **Solicitudes de adopción:**\n\n${list}`
